@@ -1,0 +1,260 @@
+---
+title: "Kickstarter Project - XGBoost Model"
+output: pdf_document
+---
+
+```{r}
+#library(tidyverse)
+library("dplyr") 
+library(caTools) # Prediction: Splitting Data
+library(car)
+library(ROCR)
+library(e1071) # Prediction: SVM, Naive Bayes, Parameter Tuning
+library(rpart) # Prediction: Decision Tree
+library(rpart.plot) # Prediction: Decision Tree
+library(caret) # Prediction: k-Fold Cross Validation
+library(xgboost) # for xgboost
+library(reshape)
+library(ggplot2)
+```
+
+In this notebook we will go over following steps:-
+
+- Reduce the amount of redundant information
+- Convert categorical information to a numeric format
+- Split dataset into testing and training subsets
+- Convert the cleaned dataframe to a Dmatrix
+- Model Training & Validation
+
+```{r}
+df <- read.csv('Kickstarter_Clean_Final.csv')
+message('Rows: ',dim(df)[1],'---Columns: ',dim(df)[2])
+```
+
+## Drop Columns
+
+Reduce the amount of redundant information
+
+```{r}
+cols_to_drop<-c('converted_pledged_amount_USD',
+'country',
+'currency',
+'pledged',
+'backers_count',
+'usd_exchange_rate',
+'usd_type',
+'goal_converted',
+'ctgy_name')
+
+df1<-df[ , !(names(df) %in% cols_to_drop)]
+message('Rows: ',dim(df1)[1],'---Columns: ',dim(df1)[2])
+```
+
+## Fixing Target Variable
+
+```{r}
+df1 <- df1 %>%
+  mutate(state = case_when(state=="failed" ~ 1, 
+                              state=="successful" ~ 0))
+```
+
+## Converting Ctgy features to numerical
+
+Some of our categorical features may include helpful information, such as staff_pick. Let's try to perserve some of these variables for our XGBoost model by converting them to the class numeric.
+
+The function model.matrix() performs one-hot encoding of categorical data and creates a sparse matrix. A value of 1 indicates that the variable is present for an observation. The first argument is the variable; the second is the dataframe. The reason we include a minus 1 after the variable is to prevent the first column from becoming the Intercept.
+
+```{r}
+head(staff_pick<-model.matrix(~ staff_pick-1, df1))
+head(launch_day<-model.matrix(~ launch_day-1, df1))
+
+head(launch_month<-model.matrix(~ launch_month-1, df1))
+head(launch_year<-model.matrix(~ launch_year-1, df1))
+
+head(lc_name<-model.matrix(~ lc_name-1, df1))
+head(lc_state<-model.matrix(~ lc_state-1, df1))
+
+head(lc_expanded_country<-model.matrix(~ lc_expanded_country-1, df1))
+head(ctgy_parent_name<-model.matrix(~ ctgy_parent_name-1, df1))
+
+df_ctgy_num <- cbind(staff_pick, launch_day, lc_name, lc_state, lc_expanded_country, ctgy_parent_name)
+#head(df_ctgy_num)
+select_num <- c('goal','launch_month','launch_hour','launch_year','campaignDuration','daysToLaunch','price','state')
+#head(df1[select_num])
+df2<-cbind(df1[select_num],data.frame(df_ctgy_num))
+head(df2)
+```
+
+## Splitting data
+
+- Train : 80 %
+- Test : 20 %
+
+```{r}
+set.seed(500)
+split = sample.split(df2$state, SplitRatio = 0.8)
+train = subset(df2, split == TRUE)
+test = subset(df2, split == FALSE)
+message("Train Rows=",dim(train)[1],'---Columns=',dim(train)[2])
+message("Test Rows=",dim(test)[1],'---Columns=',dim(test)[2])
+```
+
+## XGB Model
+
+Gradient boosting is part of a class of machine learning techniques known as ensemble methods. An ensemble method leverages the output of many weak learners in order to make a prediction. Typically, these weak learners are implemented as decision trees. While each individual weak learner might not get the answer right, on average, their combined answers should be pretty decent.
+
+In gradient boosting, each weak learner is chosen iteratively in a greedy manner, so as to minimize the loss function. **XGBoost is a highly optimized implementation of gradient boosting**. 
+
+
+```{r}
+y_train  <-train$state
+#length(y_train)
+
+y_test <- test$state
+#length(y_test)
+
+
+cols_to_drop<-c('state')
+
+X_train<-train[ , !(names(train) %in% cols_to_drop)]
+#dim(X_train)
+message('X_train Rows: ',dim(X_train)[1],'---X_train Columns: ',dim(X_train)[2])
+
+cols_to_drop<-c('state')
+
+X_test<-test[ , !(names(test) %in% cols_to_drop)]
+message('X_test Rows: ',dim(X_test)[1],'---X_test Columns: ',dim(X_test)[2])
+```
+
+- XGBoost algorithm takes a matrix as input.
+- Convert Dataframe to Dmatrix
+
+```{r}
+# convert your matrix into a Dmatrix
+dtrain <- xgb.DMatrix(data = as.matrix(X_train),label = y_train)
+dtest <- xgb.DMatrix(data = as.matrix(X_test),label = y_test)
+```
+
+## Model Training
+
+- The first argument of xgboost() takes a Dmatrix object.
+
+- The second argument, nround, is the number of times we want to improve--or boost--our naive model by adding additional error models.
+
+- Since its a binary Classification, we will specify the third argument as logistic regression for binary classification.
+
+```{r}
+# fit a model to your horse matrix
+xgb_model <- xgboost(data = dtrain, # Dmatrix of data
+                       nround = 2, # boosting iterations
+                       objective = "binary:logistic")
+```
+
+## Training Accuracy / Metrics
+
+```{r}
+prob_pred = predict(xgb_model, newdata = dtrain)
+y_pred = ifelse(prob_pred > 0.5, 1, 0)
+
+# Checking the prediction accuracy
+table(y_train, y_pred > 0.5) # Confusion matrix
+```
+
+```{r}
+err <- mean(as.numeric(prob_pred > 0.5) != y_train)
+print(paste("train-error=", err))
+message("Accuracy= ",round(((43519+10161)/dim(train)[1])*100,2),' %')
+confusionMatrix(factor(y_pred),factor(y_train),mode = "everything", positive="1")
+
+```
+
+```{r}
+message("Train F1 Score: ",0.75)
+```
+
+## Hyperparameter Tuning + Cross Validation + Early Stopping
+
+### Crossvalidation
+
+10 fold cross validation with xgb.cv
+
+
+### Hyperparameter Tuning
+
+
+Parameters for Tree Booster
+- **nrounds[default=100]**
+    It controls the maximum number of iterations. For classification, it is similar to the number of trees to grow.
+- **eta[default=0.3][range: (0,1)]**
+    It controls the learning rate, i.e., the rate at which our model learns patterns in data. After every round, it shrinks the feature weights to reach the best optimum.
+
+- **gamma[default=0][range: (0,Inf)]**
+    It controls regularization (or prevents overfitting). The optimal value of gamma depends on the data set and other parameter values.
+- **max_depth[default=6][range: (0,Inf)]**
+    It controls the depth of the tree.
+
+- **min_child_weight[default=1][range:(0,Inf)]**
+    In classification, if the leaf node has a minimum sum of instance weight (calculated by second order partial derivative) lower than min_child_weight, the tree splitting stops.
+
+- **subsample[default=1][range: (0,1)]**
+    It controls the number of samples (observations) supplied to a tree.
+
+- **colsample_bytree[default=1][range: (0,1)]**
+    It control the number of features (variables) supplied to a tree
+
+```{r}
+params <- list(booster = "gbtree", 
+               objective = "binary:logistic", 
+               eta=0.3, 
+               gamma=0, 
+               max_depth=6, 
+               min_child_weight=1, 
+               subsample=1, 
+               colsample_bytree=1)
+
+
+xgbcv <- xgb.cv( params = params, 
+                data = dtrain, 
+                nrounds = 100, 
+                nfold = 10, 
+                #metrics='aucpr',
+                eval_metric='aucpr',
+                showsd = T, 
+                stratified = T, 
+                early_stopping_rounds = 10, 
+                maximize = T
+               )
+
+xgbcv_aucpr<-xgbcv$evaluation_log %>%
+  select(iter,train_aucpr_mean,test_aucpr_mean)
+# Long format
+g2 <- melt(xgbcv_aucpr, id.vars = c("iter"))
+ggplot(g2, aes(x = iter, y = value, color = variable)) +
+    ggtitle("Training Vs Validation AUCPR") +
+  geom_line()+ylab("AUCPR")
+```
+## Test
+
+```{r}
+xgb1 <- xgb.train (params = params, 
+                   data = dtrain, 
+                   nrounds = 100, 
+                   watchlist = list(val=dtest,train=dtrain), 
+                   early_stopping_rounds= 10, 
+                   maximize = F , 
+                   eval_metric = "aucpr")
+xgbpred <- predict (xgb1,dtest)
+xgbpred <- ifelse (xgbpred > 0.5,1,0)
+confusionMatrix(factor(xgbpred),factor(y_test),mode = "everything", positive="1")
+```
+```{r}
+message("Best F1 Score for Test:", 0.75)
+```
+
+## Variable Importance
+
+```{r}
+mat <- xgb.importance (feature_names = colnames(X_train),model = xgb1)
+xgb.plot.importance (importance_matrix = mat[1:20]) 
+```
+
